@@ -2,8 +2,10 @@ import os
 import sys
 import math
 import sqlite3
+import asyncio
 import logging
 from pathlib import Path
+from git import Repo
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -13,22 +15,20 @@ from dotenv import load_dotenv
 # CONFIGURATION & LOGGING SETUP
 # ==============================================================================
 
-# Ermittelt das Verzeichnis, in dem DIESE Skript-Datei liegt
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / "secret.env"
 
-# Prüft, ob secret.env existiert
 if not ENV_PATH.exists():
     print(f"❌ FEHLER: 'secret.env' wurde nicht im Ordner {BASE_DIR} gefunden!")
     sys.exit(1)
 
-# Lädt Variablen aus der secret.env im selben Ordner
 load_dotenv(dotenv_path=ENV_PATH)
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 CREATE_CHANNEL_ID = 1532736890829275176
+DB_PATH = BASE_DIR / "voice_levels.db"
+REPO_PATH = BASE_DIR
 
-# Level-Rollen Belohnungen festlegen (Level: "Rollenname auf Discord")
 LEVEL_ROLES = {
     5: "🌿 Stübchen Neuling",
     10: "🍃 Chill Master",
@@ -36,7 +36,6 @@ LEVEL_ROLES = {
     50: "👑 Stübchen Boss"
 }
 
-# Logging lokal im Bot-Ordner
 log_dir = BASE_DIR / "logs"
 os.makedirs(log_dir, exist_ok=True)
 log_file_path = log_dir / "stuebchen_activity.log"
@@ -51,13 +50,30 @@ logging.basicConfig(
 )
 
 # ==============================================================================
+# GIT START-UP & SYNC HELPER (PC <-> Termux Brücke)
+# ==============================================================================
+
+def git_pull_database():
+    """Holt beim Start die neueste Datenbank von GitHub."""
+    try:
+        repo = Repo(REPO_PATH)
+        active_branch = repo.active_branch.name
+        origin = repo.remote(name='origin')
+        origin.pull(active_branch)
+        logging.info(f"🐙 [GITHUB SYNC] Datenbank erfolgreich von Branch '{active_branch}' geladen.")
+    except Exception as e:
+        logging.warning(f"⚠️ [GITHUB SYNC] Konnte Datenbank nicht laden (Lokaler Start fortgesetzt): {e}")
+
+# Direkt beim Skriptstart ausführen, BEVOR SQLite öffnet!
+git_pull_database()
+
+# ==============================================================================
 # DATABASE SETUP (SQLite für Voice-Zeit & XP)
 # ==============================================================================
 
-db_conn = sqlite3.connect(BASE_DIR / "voice_levels.db")
+db_conn = sqlite3.connect(DB_PATH)
 db_cursor = db_conn.cursor()
 
-# 1. Tabelle für User-XP, Level und Voice-Zeit anlegen
 db_cursor.execute("""
 CREATE TABLE IF NOT EXISTS user_levels (
     user_id INTEGER PRIMARY KEY,
@@ -68,7 +84,6 @@ CREATE TABLE IF NOT EXISTS user_levels (
 """)
 db_conn.commit()
 
-# 2. Automatische Migration für bestehende Datenbanken
 db_cursor.execute("PRAGMA table_info(user_levels)")
 columns = [column[1] for column in db_cursor.fetchall()]
 if "voice_time" not in columns:
@@ -78,11 +93,9 @@ if "voice_time" not in columns:
 
 
 async def add_voice_time(guild: discord.Guild, user_id: int, seconds: int = 15):
-    """Fügt verbrachte Sekunden und XP in die DB ein und vergibt Level-Rollen."""
     if seconds <= 0:
         return
 
-    # Formel: 5 XP pro 15 Sekunden
     earned_xp = int((seconds / 15) * 5)
 
     db_cursor.execute("SELECT xp, level, voice_time FROM user_levels WHERE user_id = ?", (user_id,))
@@ -101,16 +114,13 @@ async def add_voice_time(guild: discord.Guild, user_id: int, seconds: int = 15):
         level = row[1]
         total_time = row[2] + seconds
 
-        # Level-Up Berechnung: 100 * (Level ^ 1.5)
         needed_xp = int(100 * math.pow(level, 1.5))
         if xp >= needed_xp:
             level += 1
             logging.info(f"💨 [LEVEL UP] User {user_id} wurde im Stübchen auf Level {level} befördert!")
 
-            # Rollen-Vergabe & PN-Benachrichtigung
             member = guild.get_member(user_id)
             if member:
-                # 1. Prüfen, ob für das NEUE Level eine Rolle existiert
                 if level in LEVEL_ROLES:
                     role_name = LEVEL_ROLES[level]
                     role = discord.utils.get(guild.roles, name=role_name)
@@ -121,7 +131,6 @@ async def add_voice_time(guild: discord.Guild, user_id: int, seconds: int = 15):
                         except discord.Forbidden:
                             logging.error(f"⚠️ [FEHLER] StübchenBot fehlen Rechte für die Rolle '{role_name}'!")
 
-                # 2. Level-Up Benachrichtigung per Direktnachricht senden
                 try:
                     embed = discord.Embed(
                         title="🎉 Stübchen Level Up!",
@@ -130,10 +139,9 @@ async def add_voice_time(guild: discord.Guild, user_id: int, seconds: int = 15):
                     )
                     if level in LEVEL_ROLES:
                         embed.add_field(name="🎁 Neue Stübchen-Rolle", value=f"Du hast die Rolle **{LEVEL_ROLES[level]}** freigeschaltet! 🌿")
-                    
                     await member.send(embed=embed)
                 except discord.Forbidden:
-                    pass  # Falls der User PNs blockiert hat
+                    pass
 
         db_cursor.execute(
             "UPDATE user_levels SET xp = ?, level = ?, voice_time = ? WHERE user_id = ?",
@@ -144,7 +152,6 @@ async def add_voice_time(guild: discord.Guild, user_id: int, seconds: int = 15):
 
 
 def format_time(seconds: int) -> str:
-    """Konvertiert Sekunden in ein lesbares 'Xh Ym Zs' Format."""
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     secs = seconds % 60
@@ -162,15 +169,13 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 temp_channels = set()
-user_temp_channels = {}  # {user_id: channel_id}
-
+user_temp_channels = {}
 
 # ==============================================================================
 # DISCORD UI (BUTTON CONTROL PANEL)
 # ==============================================================================
 
 class LimitSelect(discord.ui.Select):
-    """Dropdown-Menü zum Einstellen des User-Limits."""
     def __init__(self):
         options = [
             discord.SelectOption(label="Unbegrenzt", value="0", emoji="♾️"),
@@ -189,7 +194,6 @@ class LimitSelect(discord.ui.Select):
 
 
 class OwnerSelect(discord.ui.UserSelect):
-    """User-Select zum Übertragen von Channel-Rechten."""
     def __init__(self):
         super().__init__(placeholder="Wähle den neuen Stübchen-Chef...", min_values=1, max_values=1)
 
@@ -213,7 +217,6 @@ class OwnerSelect(discord.ui.UserSelect):
 
 
 class VoiceControlView(discord.ui.View):
-    """Das interaktive Button-Panel im Voice-Textkanal."""
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(LimitSelect())
@@ -263,22 +266,50 @@ class VoiceControlView(discord.ui.View):
 
 
 # ==============================================================================
-# BACKGROUND TASKS (15-SEKUNDEN LIVE UPDATER)
+# BACKGROUND TASKS (VOICE XP & GITHUB DB AUTO-PUSH)
 # ==============================================================================
 
 @tasks.loop(seconds=15)
 async def voice_xp_loop():
-    """Gibt ALLEN Usern in Voice-Channels alle 15 Sekunden live Zeit & XP."""
     for guild in bot.guilds:
         for channel in guild.voice_channels:
             if len(channel.members) > 0:
                 for member in channel.members:
-                    # AFK-Channel ignorieren (falls vorhanden)
                     if guild.afk_channel and channel.id == guild.afk_channel.id:
                         continue
-                    
                     if not member.bot:
                         await add_voice_time(guild, member.id, seconds=15)
+
+
+def _blocking_db_git_sync():
+    """Pusht die echte SQLite-Datenbank alle 2 Minuten sicher zu GitHub."""
+    repo = Repo(REPO_PATH)
+    if repo.is_dirty(untracked_files=True, path=str(DB_PATH)):
+        repo.index.add([str(DB_PATH)])
+        repo.index.commit("auto: sync voice_levels.db between PC and Termux")
+        
+        for attempt in range(3):
+            try:
+                repo.remote(name='origin').push()
+                logging.info("🐙 [GITHUB SYNC] voice_levels.db erfolgreich zu GitHub gepusht.")
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise e
+
+
+@tasks.loop(minutes=2)
+async def github_db_sync_loop():
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(None, _blocking_db_git_sync),
+            timeout=5.0
+        )
+    except asyncio.TimeoutError:
+        logging.warning("⚠️ [GITHUB SYNC] Timeout beim DB-Push.")
+    except Exception as e:
+        logging.error(f"⚠️ [GITHUB SYNC FEHLER] {e}")
 
 
 # ==============================================================================
@@ -289,18 +320,17 @@ async def voice_xp_loop():
 async def on_ready():
     logging.info(f"🌿 StübchenBot ist am Start und eingeloggt als {bot.user}!")
 
-    # Synchronisiert die Slash Commands mit Discord
     try:
         synced = await bot.tree.sync()
         logging.info(f"💨 Erfolgreich {len(synced)} Stübchen Slash Commands synchronisiert!")
     except Exception as e:
-        logging.error(f"⚠️ Fehler beim Synchronisieren der Slash Commands: {e}")
+        logging.error(f"⚠️ Fehler beim Synchronisieren: {e}")
 
-    # Startet den 15-Sekunden Loop für Live-Gutschriften
     if not voice_xp_loop.is_running():
         voice_xp_loop.start()
+    if not github_db_sync_loop.is_running():
+        github_db_sync_loop.start()
 
-    # Aufräumen alter Leichen & Re-Initialisierung bei Neustart
     create_channel = bot.get_channel(CREATE_CHANNEL_ID)
     if create_channel and create_channel.category:
         for channel in create_channel.category.voice_channels:
@@ -321,26 +351,17 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-
-    # --------------------------------------------------------------------------
-    # USER-REGISTRIERUNG BEIM BEITRITT
-    # --------------------------------------------------------------------------
     if not member.bot and before.channel is None and after.channel is not None:
-        # Sofort mit 0 Werten anlegen, falls der User neu ist
         db_cursor.execute(
             "INSERT OR IGNORE INTO user_levels (user_id, xp, level, voice_time) VALUES (?, 0, 1, 0)",
             (member.id,)
         )
         db_conn.commit()
 
-    # --------------------------------------------------------------------------
-    # CREATE TEMP CHANNEL
-    # --------------------------------------------------------------------------
     if after.channel and after.channel.id == CREATE_CHANNEL_ID:
         guild = member.guild
         category = after.channel.category
 
-        # Spam-Schutz Check
         if member.id in user_temp_channels:
             existing_channel = guild.get_channel(user_temp_channels[member.id])
             if existing_channel:
@@ -377,9 +398,6 @@ async def on_voice_state_update(member, before, after):
         except discord.HTTPException as e:
             logging.error(f"⚠️ [FEHLER] Stübchen-Erstellung fehlgeschlagen: {e}")
 
-    # --------------------------------------------------------------------------
-    # DELETE EMPTY TEMP CHANNEL
-    # --------------------------------------------------------------------------
     if before.channel and before.channel.id in temp_channels:
         if len(before.channel.members) == 0:
             try:
@@ -397,13 +415,12 @@ async def on_voice_state_update(member, before, after):
 
 
 # ==============================================================================
-# SLASH COMMANDS (Werden bei "/" auf Discord vorgeschlagen)
+# SLASH COMMANDS
 # ==============================================================================
 
 @bot.tree.command(name="rank", description="Zeigt dein Stübchen-Level, XP und deine gesammelte Chill-Zeit an.")
 @app_commands.describe(user="Der User, dessen Stübchen-Rang du sehen möchtest (optional)")
 async def rank_cmd(interaction: discord.Interaction, user: discord.Member = None):
-    """Slash Command für /rank"""
     target_user = user or interaction.user
     
     db_cursor.execute("SELECT xp, level, voice_time FROM user_levels WHERE user_id = ?", (target_user.id,))
@@ -427,7 +444,6 @@ async def rank_cmd(interaction: discord.Interaction, user: discord.Member = None
 
 @bot.tree.command(name="top", description="Zeigt die Top 5 aktivsten Chiller im Stübchen an.")
 async def leaderboard_cmd(interaction: discord.Interaction):
-    """Slash Command für /top"""
     db_cursor.execute("SELECT user_id, level, xp, voice_time FROM user_levels ORDER BY level DESC, xp DESC LIMIT 5")
     rows = db_cursor.fetchall()
 
