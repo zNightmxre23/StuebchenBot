@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+# Dynamische Pfadermittlung: Nimmt exakt den Ordner, in dem das Skript ausgeführt/gespeichert wird
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "voice_levels.db"
 
@@ -30,10 +31,10 @@ def show_progress(step: int, total: int, label: str):
     bar = "█" * filled + "░" * (bar_length - filled)
     sys.stdout.write(f"\r⏳ [{bar}] {percent}% - {label}")
     sys.stdout.flush()
-    time.sleep(0.3)
+    time.sleep(0.2)
 
 def run_git_command(command: list) -> str:
-    """Führt einen Git-Befehl im Projektverzeichnis aus."""
+    """Führt einen Git-Befehl im aktuellen Projektverzeichnis aus."""
     result = subprocess.run(
         command,
         cwd=BASE_DIR,
@@ -44,75 +45,76 @@ def run_git_command(command: list) -> str:
     return result.stdout.strip()
 
 def check_git_connection() -> bool:
-    """Prüft die Verbindung zu GitHub."""
+    """Prüft die Verbindung zum GitHub Repository."""
     try:
         run_git_command(["git", "ls-remote", "origin"])
         return True
     except subprocess.CalledProcessError:
         return False
 
-def flush_sqlite_db():
-    """Erzwingt das Schreiben aller offenen SQLite-Puffer auf die Festplatte."""
+def flush_and_touch_db():
+    """Schreibt offene SQLite-Transaktionen raus und aktualisiert den Dateizeitstempel."""
     if DB_PATH.exists():
         try:
             conn = sqlite3.connect(DB_PATH)
-            # Schreibt den WAL-Log in die Hauptdatenbank
             conn.execute("PRAGMA wal_checkpoint(FULL);")
             conn.commit()
             conn.close()
-            # Aktualisiert den Zeitstempel der Datei auf dem Dateisystem
-            os.utime(DB_PATH, None)
         except Exception as e:
-            logging.warning(f"⚠️ SQLite Flush Hinweis: {e}")
+            logging.warning(f"⚠️ Hinweis bei SQLite Flush: {e}")
+        
+        # Aktualisiert den Modifikationszeitstempel der Datei auf dem Dateisystem,
+        # damit Git die Änderung in jedem Fall erkennt
+        os.utime(DB_PATH, None)
 
 def backup_database():
-    print("\n--- 📦 Git-Backup Prozess Gestartet ---")
+    print(f"\n--- 📦 Git-Backup Prozess Gestartet ({BASE_DIR.name}) ---")
     total_steps = 5
 
-    # Schritt 1: Verbindung prüfen
+    # Schritt 1: GitHub Verbindung prüfen
     show_progress(1, total_steps, "Prüfe GitHub-Verbindung...")
     if not check_git_connection():
         print("\n❌ [FEHLER] Keine Verbindung zum GitHub-Repository möglich!")
-        logging.error("❌ Keine Verbindung zum GitHub-Repository möglich.")
+        logging.error("❌ keine Verbindung zum GitHub-Repository möglich.")
         return
 
-    # Schritt 2: DB-Existenz & Flush
-    show_progress(2, total_steps, "Sichere SQLite-Datenbank auf Festplatte...")
+    # Schritt 2: DB prüfen & SQLite flashen
+    show_progress(2, total_steps, "Prüfe 'voice_levels.db'...")
     if not DB_PATH.exists():
-        print(f"\n⚠️ [FEHLER] Datenbank '{DB_PATH.name}' nicht vorhanden.")
-        logging.warning(f"⚠️ Datenbank {DB_PATH.name} existiert nicht.")
+        print(f"\n⚠️ [FEHLER] 'voice_levels.db' wurde in {BASE_DIR} nicht gefunden!")
+        logging.warning(f"⚠️ Datenbank 'voice_levels.db' nicht in {BASE_DIR} gefunden.")
         return
 
-    flush_sqlite_db()
+    flush_and_touch_db()
 
     try:
-        # Schritt 3: Git Add erzwingen
-        show_progress(3, total_steps, "Füge 'voice_levels.db' zu Staging hinzu...")
+        # Schritt 3: Datei zum Staging hinzufügen (erzwingen)
+        show_progress(3, total_steps, "Staging für 'voice_levels.db'...")
         run_git_command(["git", "add", "-f", "voice_levels.db"])
+
+        # Schritt 4: Commit erzwingen (auch wenn keine Inhaltlichen Änderungen vorliegen)
+        show_progress(4, total_steps, "Erstelle Commit...")
+        commit_msg = f"Update voice_levels.db: {time.strftime('%Y-%m-%d %H:%M:%S')}"
         
-        # Schritt 4: Commit erstellen
-        show_progress(4, total_steps, "Erstelle Backup-Commit...")
-        commit_msg = f"DB Backup: voice_levels.db ({time.strftime('%Y-%m-%d %H:%M:%S')})"
-        
-        # Versuche normalen Commit, sonst mit --allow-empty
         try:
             run_git_command(["git", "commit", "-m", commit_msg])
         except subprocess.CalledProcessError:
+            # Falls Git meint, es gebe nix neues, erzwingen wir den Commit
             run_git_command(["git", "commit", "--allow-empty", "-m", commit_msg])
 
-        # Schritt 5: Push ausführen
-        show_progress(5, total_steps, "Lade auf GitHub hoch...")
+        # Schritt 5: Auf GitHub pushen
+        show_progress(5, total_steps, "Pushe auf GitHub...")
         run_git_command(["git", "push", "origin", "feature/my-new-updates"])
 
-        print("\n✅ [STATUS] voice_levels.db wurde erfolgreich auf GitHub gepusht! 🚀")
-        logging.info("🚀 voice_levels.db erfolgreich auf GitHub gepusht!")
+        print("\n✅ [STATUS] 'voice_levels.db' erfolgreich auf GitHub aktualisiert! 🚀")
+        logging.info("🚀 'voice_levels.db' erfolgreich auf GitHub gepusht!")
 
     except subprocess.CalledProcessError as e:
-        print(f"\n❌ [FEHLER] Git-Prozess fehlgeschlagen.")
+        print(f"\n❌ [FEHLER] Git-Befehl fehlgeschlagen.")
         logging.error(f"❌ Git-Befehl '{' '.join(e.cmd)}' fehlgeschlagen: {e.stderr}")
     except Exception as e:
-        print(f"\n⚠️ [FEHLER] Unerwarteter Fehler aufgetreten.")
-        logging.error(f"⚠️ Unerwarteter Fehler: {e}")
+        print(f"\n⚠️ [FEHLER] Unerwarteter Fehler.")
+        logging.error(f"⚠️ Fehler: {e}")
 
 if __name__ == "__main__":
     backup_database()
