@@ -36,7 +36,7 @@ LEVEL_ROLES = {
     50: "👑 Stübchen Boss"
 }
 
-# Logging lokal im Bot-Ordner (ideal für Termux)
+# Logging lokal im Bot-Ordner
 log_dir = BASE_DIR / "logs"
 os.makedirs(log_dir, exist_ok=True)
 log_file_path = log_dir / "stuebchen_activity.log"
