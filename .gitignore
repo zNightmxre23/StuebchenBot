@@ -1,0 +1,6 @@
+secret.env
+.env
+logs/
+voice_levels.db
+__pycache__/
+.venv/

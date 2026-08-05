@@ -3,16 +3,29 @@ import sys
 import math
 import sqlite3
 import logging
+from pathlib import Path
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from dotenv import load_dotenv
 
 # ==============================================================================
 # CONFIGURATION & LOGGING SETUP
 # ==============================================================================
 
-# WICHTIGER HINWEIS: Generiere diesen Token im Discord Developer Portal neu!
-TOKEN = "MTUzMzg2OTEyNzU0MDgwNTgzNA.GhCeXb.QnKgGpSwpVlhqMn6m2zMrZar8XAFzMwntrtMQg"
+# Ermittelt das Verzeichnis, in dem DIESE Skript-Datei liegt
+BASE_DIR = Path(__file__).resolve().parent
+ENV_PATH = BASE_DIR / "secret.env"
+
+# Prüft, ob secret.env existiert
+if not ENV_PATH.exists():
+    print(f"❌ FEHLER: 'secret.env' wurde nicht im Ordner {BASE_DIR} gefunden!")
+    sys.exit(1)
+
+# Lädt Variablen aus der secret.env im selben Ordner
+load_dotenv(dotenv_path=ENV_PATH)
+
+TOKEN = os.getenv("DISCORD_TOKEN")
 CREATE_CHANNEL_ID = 1532736890829275176
 
 # Level-Rollen Belohnungen festlegen (Level: "Rollenname auf Discord")
@@ -23,11 +36,10 @@ LEVEL_ROLES = {
     50: "👑 Stübchen Boss"
 }
 
-# Logging in den Dokumente-Ordner des Systems
-documents_dir = os.path.expanduser("~/Documents")
-log_dir = os.path.join(documents_dir, "StuebchenBot_Logs")
+# Logging lokal im Bot-Ordner (ideal für Termux)
+log_dir = BASE_DIR / "logs"
 os.makedirs(log_dir, exist_ok=True)
-log_file_path = os.path.join(log_dir, "stuebchen_activity.log")
+log_file_path = log_dir / "stuebchen_activity.log"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,7 +54,7 @@ logging.basicConfig(
 # DATABASE SETUP (SQLite für Voice-Zeit & XP)
 # ==============================================================================
 
-db_conn = sqlite3.connect("voice_levels.db")
+db_conn = sqlite3.connect(BASE_DIR / "voice_levels.db")
 db_cursor = db_conn.cursor()
 
 # 1. Tabelle für User-XP, Level und Voice-Zeit anlegen
@@ -438,4 +450,7 @@ async def leaderboard_cmd(interaction: discord.Interaction):
 
 
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    if not TOKEN:
+        logging.error("❌ FEHLER: Kein DISCORD_TOKEN in der secret.env Datei gefunden!")
+    else:
+        bot.run(TOKEN)
