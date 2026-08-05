@@ -22,7 +22,18 @@ logging.basicConfig(
     ]
 )
 
+def show_progress(step: int, total: int, label: str):
+    """Zeigt eine Ladeleiste im Terminal an."""
+    percent = int((step / total) * 100)
+    bar_length = 20
+    filled = int(bar_length * step // total)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    sys.stdout.write(f"\r⏳ [{bar}] {percent}% - {label}")
+    sys.stdout.flush()
+    time.sleep(0.3)
+
 def run_git_command(command: list) -> str:
+    """Führt einen Git-Befehl im Projektverzeichnis aus."""
     result = subprocess.run(
         command,
         cwd=BASE_DIR,
@@ -32,31 +43,59 @@ def run_git_command(command: list) -> str:
     )
     return result.stdout.strip()
 
+def check_git_connection() -> bool:
+    """Prüft die Verbindung zu GitHub."""
+    try:
+        run_git_command(["git", "ls-remote", "origin"])
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
 def backup_database():
+    print("\n--- 📦 Git-Backup Prozess Gestartet ---")
+    total_steps = 5
+
+    # Schritt 1: Verbindung prüfen
+    show_progress(1, total_steps, "Prüfe GitHub-Verbindung...")
+    if not check_git_connection():
+        print("\n❌ [FEHLER] Keine Verbindung zum GitHub-Repository möglich!")
+        logging.error("❌ Keine Verbindung zum GitHub-Repository möglich.")
+        return
+
+    # Schritt 2: DB-Existenz prüfen
+    show_progress(2, total_steps, "Prüfe Datenbank-Datei...")
     if not DB_PATH.exists():
-        logging.warning(f"⚠️ [BACKUP] Datenbank {DB_PATH.name} nicht gefunden.")
+        print(f"\n⚠️ [FEHLER] Datenbank '{DB_PATH.name}' nicht vorhanden.")
+        logging.warning(f"⚠️ Datenbank {DB_PATH.name} existiert nicht.")
         return
 
     try:
+        # DB Verbindung kurz entlasten
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
         conn.close()
 
+        # Schritt 3: Git Add
+        show_progress(3, total_steps, "Füge 'voice_levels.db' zu Staging hinzu...")
         run_git_command(["git", "add", "voice_levels.db"])
-        status = run_git_command(["git", "status", "--porcelain", "voice_levels.db"])
+        
+        # Schritt 4: Commit erzwingen (auch ohne Dateiänderung via --allow-empty)
+        show_progress(4, total_steps, "Erstelle Backup-Commit...")
+        commit_msg = f"Forced Backup: voice_levels.db ({time.strftime('%Y-%m-%d %H:%M:%S')})"
+        run_git_command(["git", "commit", "--allow-empty", "-m", commit_msg])
 
-        if status:
-            commit_msg = f"Auto-backup on shutdown: voice_levels.db ({time.strftime('%Y-%m-%d %H:%M:%S')})"
-            run_git_command(["git", "commit", "-m", commit_msg])
-            run_git_command(["git", "push", "origin", "feature/my-new-updates"])
-            logging.info("📦 [GIT BACKUP] DB erfolgreich auf GitHub hochgeladen!")
-        else:
-            logging.info("💤 [GIT BACKUP] Keine Änderungen zum Sichern vorhanden.")
+        # Schritt 5: Push erzwingen
+        show_progress(5, total_steps, "Lade auf GitHub hoch...")
+        run_git_command(["git", "push", "origin", "feature/my-new-updates"])
+
+        print("\n✅ [STATUS] Backup-Commit erfolgreich auf GitHub erzeugt & hochgeladen! 🚀")
+        logging.info("🚀 Backup-Commit für voice_levels.db erfolgreich auf GitHub hochgeladen!")
 
     except subprocess.CalledProcessError as e:
-        logging.error(f"❌ [GIT FEHLER] Befehl '{' '.join(e.cmd)}' fehlgeschlagen:")
-        logging.error(f"Output: {e.stderr}")
+        print(f"\n❌ [FEHLER] Git-Prozess fehlgeschlagen.")
+        logging.error(f"❌ Git-Befehl '{' '.join(e.cmd)}' fehlgeschlagen: {e.stderr}")
     except Exception as e:
-        logging.error(f"⚠️ [FEHLER] Unerwarteter Fehler: {e}")
+        print(f"\n⚠️ [FEHLER] Unerwarteter Fehler aufgetreten.")
+        logging.error(f"⚠️ Unerwarteter Fehler: {e}")
 
 if __name__ == "__main__":
     backup_database()
