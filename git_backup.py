@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import shutil
 import logging
 import sqlite3
 import subprocess
@@ -52,63 +51,68 @@ def check_git_connection() -> bool:
     except subprocess.CalledProcessError:
         return False
 
-def prepare_db_for_commit():
-    """Erzwingt das Rausschreiben der SQLite-Datenbank und erzeugt eine frische Datei."""
+def force_db_change():
+    """Schreibt den aktuellen Backup-Zeitstempel in die Datenbank."""
     if not DB_PATH.exists():
         return False
 
     try:
-        # SQLite Anweisungen zum Leeren des Write-Ahead-Logs
         conn = sqlite3.connect(DB_PATH)
-        conn.execute("PRAGMA wal_checkpoint(FULL);")
+        cursor = conn.cursor()
+        
+        cursor.execute("CREATE TABLE IF NOT EXISTS _backup_meta (last_backup TEXT)")
+        cursor.execute("DELETE FROM _backup_meta")
+        cursor.execute("INSERT INTO _backup_meta VALUES (?)", (time.strftime('%Y-%m-%d %H:%M:%S'),))
+        
         conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(FULL);")
         conn.close()
-
-        # Erstelle eine physische Kopie und überschreibe die Datei, um Git-Änderung zu erzwingen
-        temp_path = BASE_DIR / "voice_levels_temp.db"
-        shutil.copy2(DB_PATH, temp_path)
-        shutil.move(temp_path, DB_PATH)
         return True
     except Exception as e:
-        logging.warning(f"⚠️ Hinweis beim DB-Flush: {e}")
+        logging.warning(f"⚠️ Hinweis bei DB-Aktualisierung: {e}")
         return True
 
 def backup_database():
     print(f"\n--- 📦 Git-Backup Prozess Gestartet ---")
-    total_steps = 5
+    total_steps = 6
 
     # Schritt 1: Verbindung prüfen
     show_progress(1, total_steps, "Prüfe GitHub-Verbindung...")
     if not check_git_connection():
         print("\n❌ [FEHLER] Keine Verbindung zum GitHub-Repository möglich!")
-        logging.error("❌ keine Verbindung zum GitHub-Repository möglich.")
+        logging.error("❌ Keine Verbindung zum GitHub-Repository möglich.")
         return
 
-    # Schritt 2: DB aufbereiten
-    show_progress(2, total_steps, "Bereite Datenbank für Push vor...")
-    if not prepare_db_for_commit():
+    # Schritt 2: DB-Inhalt aktualisieren
+    show_progress(2, total_steps, "Aktualisiere DB-Zeitstempel...")
+    if not force_db_change():
         print(f"\n⚠️ [FEHLER] 'voice_levels.db' nicht in {BASE_DIR} gefunden!")
         logging.warning(f"⚠️ Datenbank nicht in {BASE_DIR} gefunden.")
         return
 
+    # Schritt 3: Staging
+    show_progress(3, total_steps, "Füge 'voice_levels.db' zum Staging hinzu...")
+    run_git_command(["git", "add", "voice_levels.db"])
+
+    # Schritt 4: Commit erstellen
+    show_progress(4, total_steps, "Erstelle Backup-Commit...")
+    commit_msg = f"Backup DB Update: voice_levels.db ({time.strftime('%Y-%m-%d %H:%M:%S')})"
     try:
-        # Schritt 3: Staging erzwingen (-f ignoriert evtl. Einschränkungen in .gitignore)
-        show_progress(3, total_steps, "Füge 'voice_levels.db' zum Staging hinzu...")
-        run_git_command(["git", "add", "-f", "voice_levels.db"])
+        run_git_command(["git", "commit", "-m", commit_msg])
+    except subprocess.CalledProcessError:
+        # Falls bereits gecoomitted
+        pass
 
-        # Schritt 4: Commit erstellen
-        show_progress(4, total_steps, "Erstelle Backup-Commit...")
-        commit_msg = f"Backup DB Update: voice_levels.db ({time.strftime('%Y-%m-%d %H:%M:%S')})"
-        
-        # Versuche normalen Commit
-        try:
-            run_git_command(["git", "commit", "-m", commit_msg])
-        except subprocess.CalledProcessError:
-            # Falls sich absolut kein Byte geändert hat
-            run_git_command(["git", "commit", "--allow-empty", "-m", commit_msg])
+    # Schritt 5: Remote synchronisieren mit autostash
+    show_progress(5, total_steps, "Synchronisiere mit GitHub...")
+    try:
+        run_git_command(["git", "pull", "origin", "feature/my-new-updates", "--rebase", "--autostash"])
+    except subprocess.CalledProcessError as e:
+        logging.warning(f"⚠️ Rebase-Hinweis: {e.stderr}")
 
-        # Schritt 5: Auf GitHub pushen
-        show_progress(5, total_steps, "Pushe Datei auf GitHub...")
+    try:
+        # Schritt 6: Auf GitHub pushen
+        show_progress(6, total_steps, "Pushe Datei auf GitHub...")
         run_git_command(["git", "push", "origin", "feature/my-new-updates"])
 
         print("\n✅ [STATUS] 'voice_levels.db' wurde erfolgreich hochgeladen! 🚀")
