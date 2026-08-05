@@ -6,13 +6,16 @@ import logging
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from dotenv import load_dotenv
 
 # ==============================================================================
 # CONFIGURATION & LOGGING SETUP
 # ==============================================================================
 
-# WICHTIGER HINWEIS: Generiere diesen Token im Discord Developer Portal neu!
-TOKEN = "MTUzMzg2OTEyNzU0MDgwNTgzNA.GhCeXb.QnKgGpSwpVlhqMn6m2zMrZar8XAFzMwntrtMQg"
+# Lädt Variablen aus der .env Datei
+load_dotenv("secret.env")
+
+TOKEN = os.getenv("DISCORD_TOKEN")
 CREATE_CHANNEL_ID = 1532736890829275176
 
 # Level-Rollen Belohnungen festlegen (Level: "Rollenname auf Discord")
@@ -23,9 +26,8 @@ LEVEL_ROLES = {
     50: "👑 Stübchen Boss"
 }
 
-# Logging in den Dokumente-Ordner des Systems
-documents_dir = os.path.expanduser("~/Documents")
-log_dir = os.path.join(documents_dir, "StuebchenBot_Logs")
+# Logging lokal im Bot-Ordner (ideal für Termux)
+log_dir = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(log_dir, exist_ok=True)
 log_file_path = os.path.join(log_dir, "stuebchen_activity.log")
 
@@ -438,4 +440,7 @@ async def leaderboard_cmd(interaction: discord.Interaction):
 
 
 if __name__ == "__main__":
-    bot.run(TOKEN)
+    if not TOKEN:
+        logging.error("❌ FEHLER: Kein DISCORD_TOKEN in der .env Datei gefunden!")
+    else:
+        bot.run(TOKEN)
